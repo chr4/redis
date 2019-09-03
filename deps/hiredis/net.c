@@ -319,7 +319,7 @@ static int _redisContextConnectTcp(redisContext *c, const char *addr, int port,
 
     snprintf(_port, 6, "%d", port);
     memset(&hints,0,sizeof(hints));
-    hints.ai_family = AF_INET;
+    hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
 
     /* Try with IPv6 if no IPv4 address was found. We do it in this order since
@@ -327,13 +327,13 @@ static int _redisContextConnectTcp(redisContext *c, const char *addr, int port,
      * as this would add latency to every connect. Otherwise a more sensible
      * route could be: Use IPv6 if both addresses are available and there is IPv6
      * connectivity. */
+    // TODO: I'll just use the regular getaddrinfo() information, so we loop through it below
+    // normally
     if ((rv = getaddrinfo(c->tcp.host,_port,&hints,&servinfo)) != 0) {
-         hints.ai_family = AF_INET6;
-         if ((rv = getaddrinfo(addr,_port,&hints,&servinfo)) != 0) {
-            __redisSetError(c,REDIS_ERR_OTHER,gai_strerror(rv));
-            return REDIS_ERR;
-        }
+        __redisSetError(c,REDIS_ERR_OTHER,gai_strerror(rv));
+        return REDIS_ERR;
     }
+
     for (p = servinfo; p != NULL; p = p->ai_next) {
 addrretry:
         if ((s = socket(p->ai_family,p->ai_socktype,p->ai_protocol)) == -1)
