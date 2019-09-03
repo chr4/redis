@@ -46,7 +46,7 @@ extern char **environ;
 
 /* Address object, used to describe an ip:port pair. */
 typedef struct sentinelAddr {
-    char *ip;
+    char *hostname;
     int port;
 } sentinelAddr;
 
@@ -519,19 +519,23 @@ void sentinelIsRunning(void) {
  *  EINVAL: Invalid port number.
  */
 sentinelAddr *createSentinelAddr(char *hostname, int port) {
-    char ip[NET_IP_STR_LEN];
     sentinelAddr *sa;
 
     if (port < 0 || port > 65535) {
         errno = EINVAL;
         return NULL;
     }
+
+    // TODO: Does it make sense to check whether hostname can be resolved?
+    /*
     if (anetResolve(NULL,hostname,ip,sizeof(ip)) == ANET_ERR) {
         errno = ENOENT;
         return NULL;
     }
+    */
+
     sa = zmalloc(sizeof(*sa));
-    sa->ip = sdsnew(ip);
+    sa->hostname = sdsnew(hostname);
     sa->port = port;
     return sa;
 }
@@ -541,20 +545,20 @@ sentinelAddr *dupSentinelAddr(sentinelAddr *src) {
     sentinelAddr *sa;
 
     sa = zmalloc(sizeof(*sa));
-    sa->ip = sdsnew(src->ip);
+    sa->hostname = sdsnew(src->hostname);
     sa->port = src->port;
     return sa;
 }
 
 /* Free a Sentinel address. Can't fail. */
 void releaseSentinelAddr(sentinelAddr *sa) {
-    sdsfree(sa->ip);
+    sdsfree(sa->hostname);
     zfree(sa);
 }
 
 /* Return non-zero if two addresses are equal. */
 int sentinelAddrIsEqual(sentinelAddr *a, sentinelAddr *b) {
-    return a->port == b->port && !strcasecmp(a->ip,b->ip);
+    return a->port == b->port && !strcasecmp(a->hostname,b->hostname);
 }
 
 /* =========================== Events notification ========================== */
@@ -597,12 +601,12 @@ void sentinelEvent(int level, char *type, sentinelRedisInstance *ri,
         if (master) {
             snprintf(msg, sizeof(msg), "%s %s %s %d @ %s %s %d",
                 sentinelRedisInstanceTypeStr(ri),
-                ri->name, ri->addr->ip, ri->addr->port,
-                master->name, master->addr->ip, master->addr->port);
+                ri->name, ri->addr->hostname, ri->addr->port,
+                master->name, master->addr->hostname, master->addr->port);
         } else {
             snprintf(msg, sizeof(msg), "%s %s %s %d",
                 sentinelRedisInstanceTypeStr(ri),
-                ri->name, ri->addr->ip, ri->addr->port);
+                ri->name, ri->addr->hostname, ri->addr->port);
         }
         fmt += 2;
     } else {
@@ -924,7 +928,7 @@ void sentinelCallClientReconfScript(sentinelRedisInstance *master, int role, cha
     sentinelScheduleScriptExecution(master->client_reconfig_script,
         master->name,
         (role == SENTINEL_LEADER) ? "leader" : "observer",
-        state, from->ip, fromport, to->ip, toport, NULL);
+        state, from->hostname, fromport, to->hostname, toport, NULL);
 }
 
 /* =============================== instanceLink ============================= */
@@ -1339,7 +1343,7 @@ sentinelRedisInstance *getSentinelRedisInstanceByAddrAndRunID(dict *instances, c
 
         if (runid && !ri->runid) continue;
         if ((runid == NULL || strcmp(ri->runid, runid) == 0) &&
-            (ip == NULL || (strcmp(ri->addr->ip, ip) == 0 &&
+            (ip == NULL || (strcmp(ri->addr->hostname, ip) == 0 &&
                             ri->addr->port == port)))
         {
             instance = ri;
@@ -1479,7 +1483,7 @@ int sentinelResetMasterAndChangeAddress(sentinelRedisInstance *master, char *ip,
 
         if (sentinelAddrIsEqual(slave->addr,newaddr)) continue;
         slaves = zrealloc(slaves,sizeof(sentinelAddr*)*(numslaves+1));
-        slaves[numslaves++] = createSentinelAddr(slave->addr->ip,
+        slaves[numslaves++] = createSentinelAddr(slave->addr->hostname,
                                                  slave->addr->port);
     }
     dictReleaseIterator(di);
@@ -1489,7 +1493,7 @@ int sentinelResetMasterAndChangeAddress(sentinelRedisInstance *master, char *ip,
      * the old master. */
     if (!sentinelAddrIsEqual(newaddr,master->addr)) {
         slaves = zrealloc(slaves,sizeof(sentinelAddr*)*(numslaves+1));
-        slaves[numslaves++] = createSentinelAddr(master->addr->ip,
+        slaves[numslaves++] = createSentinelAddr(master->addr->hostname,
                                                  master->addr->port);
     }
 
@@ -1504,7 +1508,7 @@ int sentinelResetMasterAndChangeAddress(sentinelRedisInstance *master, char *ip,
     for (j = 0; j < numslaves; j++) {
         sentinelRedisInstance *slave;
 
-        slave = createSentinelRedisInstance(NULL,SRI_SLAVE,slaves[j]->ip,
+        slave = createSentinelRedisInstance(NULL,SRI_SLAVE,slaves[j]->hostname,
                     slaves[j]->port, master->quorum, master);
         releaseSentinelAddr(slaves[j]);
         if (slave) sentinelEvent(LL_NOTICE,"+slave",slave,"%@");
@@ -1512,7 +1516,7 @@ int sentinelResetMasterAndChangeAddress(sentinelRedisInstance *master, char *ip,
     zfree(slaves);
 
     /* Release the old address at the end so we are safe even if the function
-     * gets the master->addr->ip and master->addr->port as arguments. */
+     * gets the master->addr->hostname and master->addr->port as arguments. */
     releaseSentinelAddr(oldaddr);
     sentinelFlushConfig();
     return C_OK;
@@ -1730,7 +1734,7 @@ void rewriteConfigSentinelOption(struct rewriteConfigState *state) {
         master = dictGetVal(de);
         master_addr = sentinelGetCurrentMasterAddress(master);
         line = sdscatprintf(sdsempty(),"sentinel monitor %s %s %d %d",
-            master->name, master_addr->ip, master_addr->port,
+            master->name, master_addr->hostname, master_addr->port,
             master->quorum);
         rewriteConfigRewriteLine(state,"sentinel",line,1);
 
@@ -1811,7 +1815,7 @@ void rewriteConfigSentinelOption(struct rewriteConfigState *state) {
                 slave_addr = master->addr;
             line = sdscatprintf(sdsempty(),
                 "sentinel known-slave %s %s %d",
-                master->name, slave_addr->ip, slave_addr->port);
+                master->name, slave_addr->hostname, slave_addr->port);
             rewriteConfigRewriteLine(state,"sentinel",line,1);
         }
         dictReleaseIterator(di2);
@@ -1823,7 +1827,7 @@ void rewriteConfigSentinelOption(struct rewriteConfigState *state) {
             if (ri->runid == NULL) continue;
             line = sdscatprintf(sdsempty(),
                 "sentinel known-sentinel %s %s %d %s",
-                master->name, ri->addr->ip, ri->addr->port, ri->runid);
+                master->name, ri->addr->hostname, ri->addr->port, ri->runid);
             rewriteConfigRewriteLine(state,"sentinel",line,1);
         }
         dictReleaseIterator(di2);
@@ -1927,7 +1931,7 @@ void sentinelReconnectInstance(sentinelRedisInstance *ri) {
 
     /* Commands connection. */
     if (link->cc == NULL) {
-        link->cc = redisAsyncConnectBind(ri->addr->ip,ri->addr->port,NET_FIRST_BIND_ADDR);
+        link->cc = redisAsyncConnectBind(ri->addr->hostname,ri->addr->port,NET_FIRST_BIND_ADDR);
         if (link->cc->err) {
             sentinelEvent(LL_DEBUG,"-cmd-link-reconnection",ri,"%@ #%s",
                 link->cc->errstr);
@@ -1950,7 +1954,7 @@ void sentinelReconnectInstance(sentinelRedisInstance *ri) {
     }
     /* Pub / Sub */
     if ((ri->flags & (SRI_MASTER|SRI_SLAVE)) && link->pc == NULL) {
-        link->pc = redisAsyncConnectBind(ri->addr->ip,ri->addr->port,NET_FIRST_BIND_ADDR);
+        link->pc = redisAsyncConnectBind(ri->addr->hostname,ri->addr->port,NET_FIRST_BIND_ADDR);
         if (link->pc->err) {
             sentinelEvent(LL_DEBUG,"-pubsub-link-reconnection",ri,"%@ #%s",
                 link->pc->errstr);
@@ -2195,7 +2199,7 @@ void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info) {
                  mstime() - ri->role_reported_time > wait_time)
             {
                 int retval = sentinelSendSlaveOf(ri,
-                        ri->master->addr->ip,
+                        ri->master->addr->hostname,
                         ri->master->addr->port);
                 if (retval == C_OK)
                     sentinelEvent(LL_NOTICE,"+convert-to-slave",ri,"%@");
@@ -2207,7 +2211,7 @@ void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info) {
     if ((ri->flags & SRI_SLAVE) &&
         role == SRI_SLAVE &&
         (ri->slave_master_port != ri->master->addr->port ||
-         strcasecmp(ri->slave_master_host,ri->master->addr->ip)))
+         strcasecmp(ri->slave_master_host,ri->master->addr->hostname)))
     {
         mstime_t wait_time = ri->master->failover_timeout;
 
@@ -2218,7 +2222,7 @@ void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info) {
             mstime() - ri->slave_conf_change_time > wait_time)
         {
             int retval = sentinelSendSlaveOf(ri,
-                    ri->master->addr->ip,
+                    ri->master->addr->hostname,
                     ri->master->addr->port);
             if (retval == C_OK)
                 sentinelEvent(LL_NOTICE,"+fix-slave-config",ri,"%@");
@@ -2234,7 +2238,7 @@ void sentinelRefreshInstanceInfo(sentinelRedisInstance *ri, const char *info) {
         if ((ri->flags & SRI_RECONF_SENT) &&
             ri->slave_master_host &&
             strcmp(ri->slave_master_host,
-                    ri->master->promoted_slave->addr->ip) == 0 &&
+                    ri->master->promoted_slave->addr->hostname) == 0 &&
             ri->slave_master_port == ri->master->promoted_slave->addr->port)
         {
             ri->flags &= ~SRI_RECONF_SENT;
@@ -2408,7 +2412,7 @@ void sentinelProcessHelloMessage(char *hello, int hello_len) {
         if (si && master->config_epoch < master_config_epoch) {
             master->config_epoch = master_config_epoch;
             if (master_port != master->addr->port ||
-                strcmp(master->addr->ip, token[5]))
+                strcmp(master->addr->hostname, token[5]))
             {
                 sentinelAddr *old_addr;
 
@@ -2416,7 +2420,7 @@ void sentinelProcessHelloMessage(char *hello, int hello_len) {
                 sentinelEvent(LL_WARNING,"+switch-master",
                     master,"%s %s %d %s %d",
                     master->name,
-                    master->addr->ip, master->addr->port,
+                    master->addr->hostname, master->addr->port,
                     token[5], master_port);
 
                 old_addr = dupSentinelAddr(master->addr);
@@ -2508,7 +2512,7 @@ int sentinelSendHello(sentinelRedisInstance *ri) {
         announce_ip, announce_port, sentinel.myid,
         (unsigned long long) sentinel.current_epoch,
         /* --- */
-        master->name,master_addr->ip,master_addr->port,
+        master->name,master_addr->hostname,master_addr->port,
         (unsigned long long) master->config_epoch);
     retval = redisAsyncCommand(ri->link->cc,
         sentinelPublishReplyCallback, ri, "PUBLISH %s %s",
@@ -2665,7 +2669,7 @@ void addReplySentinelRedisInstance(client *c, sentinelRedisInstance *ri) {
     fields++;
 
     addReplyBulkCString(c,"ip");
-    addReplyBulkCString(c,ri->addr->ip);
+    addReplyBulkCString(c,ri->addr->hostname);
     fields++;
 
     addReplyBulkCString(c,"port");
@@ -2998,7 +3002,7 @@ void sentinelCommand(client *c) {
             sentinelAddr *addr = sentinelGetCurrentMasterAddress(ri);
 
             addReplyMultiBulkLen(c,2);
-            addReplyBulkCString(c,addr->ip);
+            addReplyBulkCString(c,addr->hostname);
             addReplyBulkLongLong(c,addr->port);
         }
     } else if (!strcasecmp(c->argv[1]->ptr,"failover")) {
@@ -3030,7 +3034,7 @@ void sentinelCommand(client *c) {
         /* SENTINEL MONITOR <name> <ip> <port> <quorum> */
         sentinelRedisInstance *ri;
         long quorum, port;
-        char ip[NET_IP_STR_LEN];
+        /* char ip[NET_IP_STR_LEN]; */ // TODO: Remove this
 
         if (c->argc != 6) goto numargserr;
         if (getLongFromObjectOrReply(c,c->argv[5],&quorum,"Invalid quorum")
@@ -3043,13 +3047,16 @@ void sentinelCommand(client *c) {
             return;
         }
 
+        // TODO: Are DNS lookups that big of an issue? Reconnects shouldn't happen that often, should they?
         /* Make sure the IP field is actually a valid IP before passing it
          * to createSentinelRedisInstance(), otherwise we may trigger a
          * DNS lookup at runtime. */
+        /*
         if (anetResolveIP(NULL,c->argv[3]->ptr,ip,sizeof(ip)) == ANET_ERR) {
             addReplyError(c,"Invalid IP address specified");
             return;
         }
+        */
 
         /* Parameters are valid. Try to create the master instance. */
         ri = createSentinelRedisInstance(c->argv[2]->ptr,SRI_MASTER,
@@ -3281,7 +3288,7 @@ void sentinelInfoCommand(client *c) {
                 "master%d:name=%s,status=%s,address=%s:%d,"
                 "slaves=%lu,sentinels=%lu\r\n",
                 master_id++, ri->name, status,
-                ri->addr->ip, ri->addr->port,
+                ri->addr->hostname, ri->addr->port,
                 dictSize(ri->slaves),
                 dictSize(ri->sentinels)+1);
         }
@@ -3618,7 +3625,7 @@ void sentinelAskMasterStateToOtherSentinels(sentinelRedisInstance *master, int f
         retval = redisAsyncCommand(ri->link->cc,
                     sentinelReceiveIsMasterDownReply, ri,
                     "SENTINEL is-master-down-by-addr %s %s %llu %s",
-                    master->addr->ip, port,
+                    master->addr->hostname, port,
                     sentinel.current_epoch,
                     (master->failover_state > SENTINEL_FAILOVER_STATE_NONE) ?
                     sentinel.myid : "*");
@@ -4129,7 +4136,7 @@ void sentinelFailoverDetectEnd(sentinelRedisInstance *master) {
             if (slave->link->disconnected) continue;
 
             retval = sentinelSendSlaveOf(slave,
-                    master->promoted_slave->addr->ip,
+                    master->promoted_slave->addr->hostname,
                     master->promoted_slave->addr->port);
             if (retval == C_OK) {
                 sentinelEvent(LL_NOTICE,"+slave-reconf-sent-be",slave,"%@");
@@ -4186,7 +4193,7 @@ void sentinelFailoverReconfNextSlave(sentinelRedisInstance *master) {
 
         /* Send SLAVEOF <new master>. */
         retval = sentinelSendSlaveOf(slave,
-                master->promoted_slave->addr->ip,
+                master->promoted_slave->addr->hostname,
                 master->promoted_slave->addr->port);
         if (retval == C_OK) {
             slave->flags |= SRI_RECONF_SENT;
@@ -4209,10 +4216,10 @@ void sentinelFailoverSwitchToPromotedSlave(sentinelRedisInstance *master) {
                                  master->promoted_slave : master;
 
     sentinelEvent(LL_WARNING,"+switch-master",master,"%s %s %d %s %d",
-        master->name, master->addr->ip, master->addr->port,
-        ref->addr->ip, ref->addr->port);
+        master->name, master->addr->hostname, master->addr->port,
+        ref->addr->hostname, ref->addr->port);
 
-    sentinelResetMasterAndChangeAddress(master,ref->addr->ip,ref->addr->port);
+    sentinelResetMasterAndChangeAddress(master,ref->addr->hostname,ref->addr->port);
 }
 
 void sentinelFailoverStateMachine(sentinelRedisInstance *ri) {
@@ -4369,4 +4376,3 @@ void sentinelTimer(void) {
      * election because of split brain voting). */
     server.hz = CONFIG_DEFAULT_HZ + rand() % CONFIG_DEFAULT_HZ;
 }
-
