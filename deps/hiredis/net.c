@@ -202,15 +202,15 @@ static int redisContextTimeoutMsec(redisContext *c, long *result)
 }
 
 static int redisContextWaitReady(redisContext *c, long msec) {
-    struct pollfd   wfd[1];
+    struct pollfd   wfd;
 
-    wfd[0].fd     = c->fd;
-    wfd[0].events = POLLOUT;
+    wfd.fd     = c->fd;
+    wfd.events = POLLOUT;
 
     if (errno == EINPROGRESS) {
         int res;
 
-        if ((res = poll(wfd, 1, msec)) == -1) {
+        if ((res = poll(&wfd, 1, msec)) == -1) {
             __redisSetErrorFromErrno(c, REDIS_ERR_IO, "poll(2)");
             redisContextCloseFd(c);
             return REDIS_ERR;
